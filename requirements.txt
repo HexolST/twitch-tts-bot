@@ -1,0 +1,6 @@
+twitchio<3
+python-dotenv
+requests
+pygame
+websockets
+num2words

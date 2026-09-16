@@ -1,0 +1,16 @@
+{
+  "tts_enabled": true,
+  "command": "!s",
+  "cooldown_seconds": 5,
+  "max_message_length": 200,
+  "allowed_users": [],
+  "blocked_users": [],
+  "subs_only": false,
+  "reward_id": "",
+  "voice_id": "8d2c17a9b26d4d83888ea67a1ee565b2",
+  "voices": {
+    "default": "8d2c17a9b26d4d83888ea67a1ee565b2"
+  },
+  "reward_id_voz": "",
+  "streamerbot_enabled": false
+}
