@@ -1,4 +1,5 @@
 # BOT TTS para Twitch
+![HexolST TTS Bot](TTS.png)
 
 **Desarrollado por: HexolST**
 
