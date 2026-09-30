@@ -6,11 +6,14 @@
   "allowed_users": [],
   "blocked_users": [],
   "subs_only": false,
+  "vips_only": false,
+  "artists_only": false,
   "reward_id": "",
-  "voice_id": "8d2c17a9b26d4d83888ea67a1ee565b2",
+  "voice_id": "",
   "voices": {
-    "default": "8d2c17a9b26d4d83888ea67a1ee565b2"
+    "default": ""
   },
   "reward_id_voz": "",
-  "streamerbot_enabled": false
+  "streamerbot_enabled": false,
+  "modo_personajes": false
 }

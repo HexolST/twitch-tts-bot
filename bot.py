@@ -22,7 +22,10 @@ FISH_API_KEY = os.getenv("FISH_API_KEY")
 pygame.mixer.init()
 
 CONFIG_PATH = "config.json"
+VOCES_USUARIOS_PATH = "voces_usuarios.json"
 STREAMERBOT_WS_URL = "ws://127.0.0.1:8080/"
+
+PATRON_CARACTERES_PERMITIDOS = re.compile(r"[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑüÜ¿?¡!.,:;\-'\"() \n]")
 
 
 def cargar_config():
@@ -35,6 +38,46 @@ def guardar_config(config):
         json.dump(config, f, ensure_ascii=False, indent=2)
 
 
+def cargar_voces_usuarios():
+    try:
+        with open(VOCES_USUARIOS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def guardar_voces_usuarios(datos):
+    with open(VOCES_USUARIOS_PATH, "w", encoding="utf-8") as f:
+        json.dump(datos, f, ensure_ascii=False, indent=2)
+
+
+def obtener_voz_usuario(usuario):
+    usuario = usuario.lower()
+    voces_usuarios = cargar_voces_usuarios()
+    config = cargar_config()
+    voces_disponibles = config.get("voices", {})
+
+    voz_actual = voces_usuarios.get(usuario)
+
+    if voz_actual and voz_actual in voces_disponibles.values():
+        return voz_actual
+
+    opciones = [vid for nombre, vid in voces_disponibles.items() if nombre != "default"]
+    if not opciones:
+        opciones = list(voces_disponibles.values())
+    if not opciones:
+        return ""
+
+    nueva_voz = random.choice(opciones)
+    voces_usuarios[usuario] = nueva_voz
+    guardar_voces_usuarios(voces_usuarios)
+    return nueva_voz
+
+
+def limpiar_texto_raro(texto):
+    return PATRON_CARACTERES_PERMITIDOS.sub("", texto)
+
+
 def normalizar_numeros(texto):
     def reemplazar(match):
         numero = int(match.group())
@@ -42,7 +85,7 @@ def normalizar_numeros(texto):
     return re.sub(r"\d+", reemplazar, texto)
 
 
-def generar_audio(texto, nombre_archivo="salida.mp3"):
+def generar_audio(texto, nombre_archivo="salida.mp3", voice_id_override=None):
     config = cargar_config()
 
     url = "https://api.fish.audio/v1/tts"
@@ -52,10 +95,16 @@ def generar_audio(texto, nombre_archivo="salida.mp3"):
         "model": "s2.1-pro-free",
     }
 
+    texto = limpiar_texto_raro(texto).strip()
+
+    if len(texto) == 0:
+        print("⚠️ El texto quedó vacío después de filtrar símbolos, se omite el audio")
+        return False
+
     texto = normalizar_numeros(texto)
     data = {"text": texto, "format": "mp3"}
 
-    voice_id = config.get("voice_id", "")
+    voice_id = voice_id_override if voice_id_override else config.get("voice_id", "")
     if voice_id:
         data["reference_id"] = voice_id
 
@@ -92,15 +141,28 @@ class Bot(commands.Bot):
 
     async def procesar_cola(self):
         while True:
-            texto = await self.cola.get()
-            print(f"🎙️ Generando audio para: {texto}")
+            usuario, texto = await self.cola.get()
+            print(f"🎙️ Generando audio para: {texto} (usuario: {usuario})")
 
             nombre_archivo = f"audio_{uuid.uuid4().hex}.mp3"
 
-            if generar_audio(texto, nombre_archivo):
+            config = cargar_config()
+            voz_override = None
+            if config.get("modo_personajes", False) and usuario:
+                voz_override = obtener_voz_usuario(usuario)
+
+            if generar_audio(texto, nombre_archivo, voz_override):
                 pygame.mixer.music.load(nombre_archivo)
                 pygame.mixer.music.play()
+
+                tiempo_inicio = time.time()
+                duracion_maxima = (len(texto) * 0.1) + 5
+
                 while pygame.mixer.music.get_busy():
+                    if time.time() - tiempo_inicio > duracion_maxima:
+                        pygame.mixer.music.stop()
+                        print(f"⚠️ Audio cortado por exceder la duración máxima ({duracion_maxima:.1f}s)")
+                        break
                     await asyncio.sleep(0.1)
 
                 pygame.mixer.music.unload()
@@ -127,7 +189,6 @@ class Bot(commands.Bot):
 
                     async for mensaje in ws:
                         evento = json.loads(mensaje)
-
                         tipo = evento.get("event", {}).get("type")
                         if tipo != "RewardRedemption":
                             continue
@@ -159,9 +220,16 @@ class Bot(commands.Bot):
                                 nombre_elegido = random.choice(opciones)
                                 nueva_voz = voces[nombre_elegido]
 
-                            config["voice_id"] = nueva_voz
-                            guardar_config(config)
-                            print(f"🔀 Voz cambiada a: {nombre_elegido}")
+                            if config.get("modo_personajes", False):
+                                usuario_canje_voz = data.get("user_login", "").strip().lower()
+                                voces_usuarios = cargar_voces_usuarios()
+                                voces_usuarios[usuario_canje_voz] = nueva_voz
+                                guardar_voces_usuarios(voces_usuarios)
+                                print(f"🔀 Voz de {usuario_canje_voz} cambiada a: {nombre_elegido}")
+                            else:
+                                config["voice_id"] = nueva_voz
+                                guardar_config(config)
+                                print(f"🔀 Voz cambiada a: {nombre_elegido}")
                             continue
 
                         reward_id_configurado = config.get("reward_id", "")
@@ -169,8 +237,9 @@ class Bot(commands.Bot):
                             continue
 
                         texto = data.get("user_input", "")
+                        usuario_canje = data.get("user_login", "").strip().lower()
                         if texto.strip():
-                            await self.cola.put(texto.strip())
+                            await self.cola.put((usuario_canje, texto.strip()))
 
             except Exception as e:
                 print(f"⚠️ Conexión con Streamer.bot perdida o falló: {e}")
@@ -221,6 +290,63 @@ class Bot(commands.Bot):
             guardar_config(config)
             estado = "activado" if config["subs_only"] else "desactivado"
             await message.channel.send(f"Modo solo-subs {estado}")
+            return
+
+        if palabra_clave == "!ttsvips":
+            if not es_mod:
+                return
+            if len(partes) < 2:
+                await message.channel.send("Uso: !ttsvips on / !ttsvips off")
+                return
+            valor = partes[1].strip().lower()
+            if valor in ("on", "activado"):
+                config["vips_only"] = True
+            elif valor in ("off", "desactivado"):
+                config["vips_only"] = False
+            else:
+                await message.channel.send("Uso: !ttsvips on / !ttsvips off")
+                return
+            guardar_config(config)
+            estado = "activado" if config["vips_only"] else "desactivado"
+            await message.channel.send(f"Modo solo-VIPs {estado}")
+            return
+
+        if palabra_clave == "!ttsartists":
+            if not es_mod:
+                return
+            if len(partes) < 2:
+                await message.channel.send("Uso: !ttsartists on / !ttsartists off")
+                return
+            valor = partes[1].strip().lower()
+            if valor in ("on", "activado"):
+                config["artists_only"] = True
+            elif valor in ("off", "desactivado"):
+                config["artists_only"] = False
+            else:
+                await message.channel.send("Uso: !ttsartists on / !ttsartists off")
+                return
+            guardar_config(config)
+            estado = "activado" if config["artists_only"] else "desactivado"
+            await message.channel.send(f"Modo solo-artistas {estado}")
+            return
+
+        if palabra_clave == "!modopersonajes":
+            if not es_mod:
+                return
+            if len(partes) < 2:
+                await message.channel.send("Uso: !modopersonajes on / !modopersonajes off")
+                return
+            valor = partes[1].strip().lower()
+            if valor in ("on", "activado"):
+                config["modo_personajes"] = True
+            elif valor in ("off", "desactivado"):
+                config["modo_personajes"] = False
+            else:
+                await message.channel.send("Uso: !modopersonajes on / !modopersonajes off")
+                return
+            guardar_config(config)
+            estado = "activado 🎭" if config["modo_personajes"] else "desactivado"
+            await message.channel.send(f"Modo personajes {estado}")
             return
 
         if palabra_clave == "!addvoice":
@@ -282,6 +408,31 @@ class Bot(commands.Bot):
                 await message.channel.send(f"No existe la voz '{nombre_voz}'. Disponibles: {disponibles}")
             return
 
+        if palabra_clave == "!setuservoice":
+            if not es_mod:
+                return
+            if len(partes) < 2:
+                await message.channel.send("Uso: !setuservoice usuario nombre_voz")
+                return
+            argumentos = partes[1].split(" ", 1)
+            if len(argumentos) < 2:
+                await message.channel.send("Uso: !setuservoice usuario nombre_voz")
+                return
+            usuario_objetivo = argumentos[0].strip().lower().lstrip("@")
+            nombre_voz = argumentos[1].strip().lower()
+            voces = config.get("voices", {})
+
+            if nombre_voz not in voces:
+                disponibles = ", ".join(voces.keys())
+                await message.channel.send(f"No existe la voz '{nombre_voz}'. Disponibles: {disponibles}")
+                return
+
+            voces_usuarios = cargar_voces_usuarios()
+            voces_usuarios[usuario_objetivo] = voces[nombre_voz]
+            guardar_voces_usuarios(voces_usuarios)
+            await message.channel.send(f"Voz de @{usuario_objetivo} cambiada a '{nombre_voz}' ✅")
+            return
+
         if palabra_clave == "!voicelist":
             voces = config.get("voices", {})
             if not voces:
@@ -304,7 +455,7 @@ class Bot(commands.Bot):
 
         if palabra_clave == "!ttscomandos":
             comandos_publicos = "!voicelist, !s <mensaje>"
-            comandos_mod = "!ttson, !ttsoff, !ttssubs on/off, !setvoice <nombre>, !addvoice <nombre> <id>, !removevoice <nombre>, !ultimocanje"
+            comandos_mod = "!ttson, !ttsoff, !ttssubs on/off, !ttsvips on/off, !ttsartists on/off, !modopersonajes on/off, !setvoice <nombre>, !addvoice <nombre> <id>, !removevoice <nombre>, !setuservoice <usuario> <voz>, !ultimocanje"
 
             if es_mod:
                 await message.channel.send(f"Comandos: {comandos_publicos} | Mods: {comandos_mod}")
@@ -326,10 +477,18 @@ class Bot(commands.Bot):
         if usuario in blocked:
             return
 
-        if allowed and usuario not in allowed:
-            return
+        restricciones_activas = []
+        if config.get("subs_only", False):
+            restricciones_activas.append(message.author.is_subscriber)
+        if config.get("vips_only", False):
+            restricciones_activas.append(getattr(message.author, "is_vip", False))
+        if config.get("artists_only", False):
+            badges = getattr(message.author, "badges", {}) or {}
+            restricciones_activas.append("artist-badge" in badges)
 
-        if config.get("subs_only", False) and not message.author.is_subscriber and usuario not in allowed:
+        cumple_alguna = any(restricciones_activas) if restricciones_activas else True
+
+        if restricciones_activas and not cumple_alguna and usuario not in allowed and not es_mod:
             return
 
         cooldown = config.get("cooldown_seconds", 5)
@@ -347,7 +506,7 @@ class Bot(commands.Bot):
         if len(texto) > max_len:
             texto = texto[:max_len]
 
-        await self.cola.put(texto)
+        await self.cola.put((usuario, texto))
 
 
 if __name__ == "__main__":
